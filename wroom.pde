@@ -1,192 +1,147 @@
+/**
+  BasicHTTPSClient.ino
+  Created on: 14.10.2018
+ */
+
+#include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
-#include <ChaChaPoly.h>
+#include <WiFiMulti.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 struct Cred {
 	String ssid;
 	String password;
 };
-#include "creds.h" // defines a const Cred creds[], a const uint8_t[] ccpsk, and a const uint8_t[16] rngs;
-#include <OneWire.h>
-#include <DallasTemperature.h>
-
-class WiFiUDPExt : public WiFiUDP {
-	public:
-		using WiFiUDP::write;
-		size_t write(String sz) {
-			return write(sz.c_str(), sz.length());
-		}
-		size_t write(const char * sz, size_t len) {
-			static_assert(CHAR_BIT == 8, "Embedded devs. -.-");
-			return write(reinterpret_cast<const uint8_t*>(sz), len);
-		}
-};
+#include "creds.h" // defines a const Cred creds[]
 
 OneWire oneWire(13);
 DallasTemperature sensors(&oneWire);
 DeviceAddress ds18b20a = { 0x28, 0xFF, 0x2D, 0x50, 0x69, 0x14, 0x4, 0x19 };
-const char * udpAddress = "178.254.55.220";
-const int udpPort = 3579;
-WiFiUDPExt udp;
-ChaChaPoly ccp;
-Poly1305 poly1305;
 
+// Actually selfsig cert. Hope that's fine…
+const char* rootCACertificate = \
+	"-----BEGIN CERTIFICATE-----\n" \
+	"MIID4jCCAsqgAwIBAgIJANW5KlgBieqtMA0GCSqGSIb3DQEBCwUAMIGFMQswCQYD\n" \
+	"VQQGEwJERTETMBEGA1UECAwKU29tZS1TdGF0ZTEPMA0GA1UEBwwGQmVybGluMQ4w\n" \
+	"DAYDVQQKDAVsaWZ0TTERMA8GA1UEAwwIbGlmdG0uZGUxLTArBgkqhkiG9w0BCQEW\n" \
+	"HmxpZnRtZGUtc2VsZnNpZy1hZG1pbkBsaWZ0bS5kZTAeFw0xOTAxMTQwODQwNDla\n" \
+	"Fw0zNDAxMTAwODQwNDlaMIGFMQswCQYDVQQGEwJERTETMBEGA1UECAwKU29tZS1T\n" \
+	"dGF0ZTEPMA0GA1UEBwwGQmVybGluMQ4wDAYDVQQKDAVsaWZ0TTERMA8GA1UEAwwI\n" \
+	"bGlmdG0uZGUxLTArBgkqhkiG9w0BCQEWHmxpZnRtZGUtc2VsZnNpZy1hZG1pbkBs\n" \
+	"aWZ0bS5kZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL641ixlKXdB\n" \
+	"V9lSuYlegtkF67EbLYHjXDMaDjL4uxjsNj8LJLVu2v/emFaFteOT1OJ5v3bdSvlo\n" \
+	"l3ErHb8K6B0H/KYebmWK8Mr3cETxSX8JL0AKPIm6KwhObp86nNtq77zFTg3lHxXz\n" \
+	"/Onc+e/rwpW2o6tpEalB410248+JeP12vObHDMHk6/hvnAKfA+wdzbTc0Wfn3Jo2\n" \
+	"pIeE+gmNjQCW/VfxFKHCJakNOoFWzYOHaCwdupOFeJfu/Ze7OT0DaHcFILN0weng\n" \
+	"fo5L5ZLAqirq6bmC0unRXi+7McuqhEHcQuY7J9xu2bfFDE5nDfCGPzeTU1D2MoYL\n" \
+	"13QK8zZqdZsCAwEAAaNTMFEwHQYDVR0OBBYEFHEtfz1RDuJHduvNHBn1iHmGsCji\n" \
+	"MB8GA1UdIwQYMBaAFHEtfz1RDuJHduvNHBn1iHmGsCjiMA8GA1UdEwEB/wQFMAMB\n" \
+	"Af8wDQYJKoZIhvcNAQELBQADggEBAGkyoIcfUd+wJmVqrrS5AdECaHqPsCTNdv7F\n" \
+	"8+vArSvb9mngVThKPLZoeNAC9rXEtQaBpBY9VsENklmdYjl6i75idKYB+jIe4fsh\n" \
+	"08QuzVB3VSARgOabm1mJh57S9pXxrHWHda/vcP8H0HCExT1FSRP2AjNN5ub6Y/b+\n" \
+	"44rjr5lYj978yeblM2ThtAa8GYW363GoATrcTxJ3HtH6KuoI8xlJksvzL3j42DzF\n" \
+	"B3MK11pwJqHTrzcCefMPY0f7PozFTsumckHJah/I3S2spCrZ/ja75zx+45nKOt5U\n" \
+	"BINVDIuQrp9l3mJorSl3CCMuPPy7OZ2HLb1m6uKd7KpfZsIvdJE=\n" \
+	"-----END CERTIFICATE-----\n";
 
-template<class T, size_t N>
-constexpr size_t size(T (&)[N]) { return N; }
+// Not sure if WiFiClientSecure checks the validity date of the certificate. 
+// Setting clock just to be sure...
+void setClock() {
+	configTime(0, 0, "pool.ntp.org");
 
-String translateEncryptionType(wifi_auth_mode_t encryptionType) {
-	switch (encryptionType) {
-		case (WIFI_AUTH_OPEN):
-			return "Open";
-		case (WIFI_AUTH_WEP):
-			return "WEP";
-		case (WIFI_AUTH_WPA_PSK):
-			return "WPA";
-		case (WIFI_AUTH_WPA2_PSK):
-			return "WPA2";
-		case (WIFI_AUTH_WPA_WPA2_PSK):
-			return "WPA/2";
-		case (WIFI_AUTH_WPA2_ENTERPRISE):
-			return "WPA2E";
-	}
-}
-
-void printSzLen(String sz, size_t len) {
-	if (sz.length() > len)
-		sz = sz.substring(0, len);
-	Serial.print(sz);
-	size_t extra = len - sz.length();
-	while (extra --> 0)
-		Serial.print(" ");
-}
-template<typename T> void printLen(T sz, size_t len) { printSzLen(String(sz), len); }
-
-const Cred * scanNetworks() {
-
-	int numberOfNetworks = WiFi.scanNetworks();
-
-	Serial.print("Number of networks found: ");
-	Serial.println(numberOfNetworks);
-	const Cred * ret = nullptr;
-
-	if (numberOfNetworks < 1) {
-		WiFi.scanDelete();
-		return nullptr;
+	Serial.print(F("Waiting for NTP time sync: "));
+	time_t nowSecs = time(nullptr);
+	while (nowSecs < 8 * 3600 * 2) {
+		delay(500);
+		Serial.print(F("."));
+		yield();
+		nowSecs = time(nullptr);
 	}
 
-	printLen("ESSID", 39);
-	Serial.print(" | ");
-	printLen("BSSID", 17);
-	Serial.print(" | ");
-	printLen("Str", 4);
-	Serial.print(" | ");
-	printLen("Chn", 3);
-	Serial.print(" | ");
-	printLen("Enc", 5);
-	Serial.println("");
-	for (size_t i = 0; i < 80; i++)
-		Serial.print("-");
-	Serial.println("");
-
-	for (int i = 0; i < numberOfNetworks; i++) {
-
-		String ssid = WiFi.SSID(i);
-		printLen(ssid, 39);
-		if (ret == nullptr)
-			for (const Cred& cred : creds)
-				if (cred.ssid == ssid) {
-					//Serial.println("Jackpot!");
-					ret = &cred;
-				}
-		Serial.print(" | ");
-		printLen(WiFi.BSSIDstr(i), 17);
-		Serial.print(" | ");
-		printLen(WiFi.RSSI(i), 4);
-		Serial.print(" | ");
-		printLen(WiFi.channel(i), 3);
-		Serial.print(" | ");
-		printLen(translateEncryptionType(WiFi.encryptionType(i)), 5);
-		Serial.println("");
-	}
-	
-	Serial.println("");
-	return ret;
+	Serial.println();
+	struct tm timeinfo;
+	gmtime_r(&nowSecs, &timeinfo);
+	Serial.print(F("Current time: "));
+	Serial.print(asctime(&timeinfo));
 }
 
-bool connectToNetwork(const Cred * cred) {
-	WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
 
-	size_t attempts = 30;
-
-	while (attempts --> 0) {
-		Serial.print("Establishing connection to WiFi (");
-		Serial.print(attempts);
-		Serial.println(")...");
-		delay(1000);
-		if (WiFi.status() == WL_CONNECTED) {
-			Serial.println("Connected to network");
-			return true;
-		}
-	}
-
-	WiFi.disconnect(false, true);
-	Serial.println("Connect timeout");
-	return false;
-}
+WiFiMulti WiFiMulti;
+WiFiClientSecure client;
+HTTPClient https;
 
 void setup() {
-    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[13], PIN_FUNC_GPIO);
-	ccp.setKey(ccpsk, size(ccpsk));
-	rngs.reset(
+	PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[13], PIN_FUNC_GPIO);
 
 	Serial.begin(115200);
-	sensors.begin();
-	
-	Serial.println("");
-	Serial.println(WiFi.localIP());
-}
+	Serial.setDebugOutput(true);
 
-void loop() {
-	if (WiFi.status() != WL_CONNECTED) {
-		if (const Cred * cred = scanNetworks()) {
-			connectToNetwork(cred);			
-  			udp.begin(udpPort);
+	Serial.println();
+	Serial.println();
+	Serial.println();
+
+	WiFi.mode(WIFI_STA);
+	for (const Cred& cred : creds)
+		WiFiMulti.addAP(cred.ssid.c_str(), cred.password.c_str());
+
+	// wait for WiFi connection
+	Serial.print("Waiting for WiFi to connect...");
+	size_t retry = 300;
+	while ((WiFiMulti.run() != WL_CONNECTED)) {
+		Serial.print(".");
+		delay(1000);
+		if (retry --> 0) {
+			Serial.println("Failure, resetting");
+			delay(1000);
+			ESP.restart();
 		}
 	}
+	Serial.println(" connected");
+
+	setClock();
+	client.setCACert(rootCACertificate);
+	https.setReuse(true);
+	sensors.setResolution(ds18b20a, 11);
+}
+
+bool firstsane = false;
+
+void loop() {
+	Serial.print("Getting temp...");
 	sensors.requestTemperatures();
+	Serial.println();
 	Serial.print("Sensor 1 (°C): ");
 	auto sentemp = sensors.getTempC(ds18b20a);
-	Serial.print(sentemp);
-	Serial.print(" (°F): ");
-	Serial.println(sensors.getTempF(ds18b20a));
-	if (WiFi.status() == WL_CONNECTED) {
-		String msg("");
-		msg += WiFi.macAddress();
-		msg += "\n";
-		msg += "s1: ";
-		msg += String(sentemp);
-		msg += "\n";
-		uint8_t enc[];
-		// TODO: IV
-		udp.beginPacket(udpAddress, udpPort);
-		udp.endPacket();
-		Serial.println("Sent.");
+	Serial.println(sentemp);
+	if (sentemp <= -127 || sentemp >= 85 || (!firstsane && sentemp == 0)) {
+		delay(1000);
+		firstsane = false;
+		return;
 	}
-
-	delay(5000);
-
-	//byte addr[8];
-	//if (!oneWire.search(addr)) {
-	//	Serial.println(" No more addresses.");
-	//	Serial.println();
-	//	oneWire.reset_search();
-	//	delay(250);
-	//	return;
-	//}
-	//Serial.print(" ROM =");
-	//for (size_t i = 0; i < 8; i++) {
-	//	Serial.write(' ');
-	//	Serial.println(addr[i], HEX);
-	//}
-
+	firstsane = true;
+	if (WiFiMulti.run() != WL_CONNECTED) {
+		Serial.println("Connection not available.");
+		delay(1000);
+	}
+	Serial.print("[HTTPS] begin...\n");
+	auto url = String("https://liftm.de:444/Kousaku/PIFenster/tempadd.php?key=") + apikey;
+	url += "&s1=" + String(sentemp);
+	if (https.begin(client, url)) {
+		Serial.print("[HTTPS] PUT...\n");
+		int httpCode = https.PUT(String());
+		if (httpCode > 0) {
+			Serial.printf("[HTTPS] finished, code: %d\n", httpCode);
+		} else {
+			Serial.printf("[HTTPS] failed, error: %s\n", https.errorToString(httpCode).c_str());
+		}
+		Serial.println(https.getString());
+		//https.end();
+		Serial.println("Waiting 30s before the next round...");
+		delay(30000);
+	} else {
+		Serial.printf("[HTTPS] Unable to connect\n Retrying...");
+		delay(3000);
+	}
 }
